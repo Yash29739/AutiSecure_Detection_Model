@@ -1,5 +1,5 @@
 # Use Python 3.10 (works well with mediapipe / tensorflow)
-FROM python:3.12.2
+FROM python:3.10-slim
 
 # Prevent Python from writing .pyc files and buffer stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -26,7 +26,7 @@ RUN pip install --upgrade pip setuptools wheel \
 COPY . .
 
 # Expose port (match the port you use in uvicorn)
-EXPOSE 10000
+EXPOSE 7860
 
 # Command to run your FastAPI app (adjust filename if needed)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]

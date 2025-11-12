@@ -1,18 +1,15 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 import tempfile
 import requests
 from pydantic import BaseModel
 
 # --- 1. Import your project's components ---
 from utils.video_analyzer import analyze_video_for_traits
-from utils.model_predictor import load_model, generate_prediction_and_report
+from utils.model_predictor import load_model, generate_prediction_and_report, train_and_save_model
 
-# --- 2. Define the expected request data structure using Pydantic ---
-# This provides automatic data validation. The API will only accept
-# requests that have a 'video_path' field which is a string.
-class VideoRequest(BaseModel):
-    videoUrl: str
+train_and_save_model('./dataset/trained_labels.csv', './dataset/tested_labels.csv');
+
 
 # --- 3. Initialize the FastAPI application ---
 app = FastAPI(
@@ -28,65 +25,76 @@ PREDICTOR_MODEL = load_model()
 print("--- Model Initialized. API is ready to accept requests. ---")
 
 
-@app.post("/analyze", tags=["Analysis"])
-def analyze_video_endpoint(request: VideoRequest):
-    """
-    Receives a path to a video file, runs the full analysis pipeline,
-    and returns a comprehensive report as a JSON object.
-    """
-    videoUrl = request.videoUrl
 
+class VideoRequest(BaseModel):
+    videoUrl: str
+    userId: str  # add userId so Python can return it to Node
+
+app = FastAPI()
+MODEL = load_model()
+
+NODE_CALLBACK_URL = "https://autisense-backend.onrender.com/api/video"
+
+@app.post("/analyze")
+async def analyze_video_endpoint(request: VideoRequest, background_tasks: BackgroundTasks):
+    # Respond instantly
+    background_tasks.add_task(run_analysis_and_callback, request.videoUrl, request.userId)
+    return {"message": "Job accepted, running in background"}
+
+def run_analysis_and_callback(videoUrl: str, userId: str):
     try:
-
-        # --- Step 1: Download video into a temp file ---
-        with tempfile.NamedTemporaryFile( delete = False, suffix = ".mp4") as tmp_file:
-            response = requests.get(videoUrl, stream = True)
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download video from URL: {videoUrl}"
-                )
-            
-            for chunk in response.iter_content(chunk_size = 8192):
-                if chunk: 
-                    tmp_file.write(chunk)
-
+        # --- Step 1: Download video ---
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+            r = requests.get(videoUrl, stream=True, timeout=30)
+            for chunk in r.iter_content(chunk_size=8192):
+                tmp_file.write(chunk)
             tmp_path = tmp_file.name
-        
-        print(f"Download video to: {tmp_path}")
 
-
-        # --- Run your existing analysis pipeline ---
-        print(f"Starting analysis for: {tmp_path}")
+        # --- Step 2: Run analysis ---
         video_features = analyze_video_for_traits(tmp_path)
+        report = generate_prediction_and_report(video_features, MODEL)
 
-        if video_features:
-            # Generate the final report using the modified function
-            report = generate_prediction_and_report(video_features, PREDICTOR_MODEL)
-            print(f"Analysis complete for: {tmp_path}")
-            # FastAPI automatically converts the dictionary to a JSON response
-            return report
-        else:
-            raise HTTPException(
-                status_code=500, 
-                detail="Video analysis failed to return any features."
-            )
+        # --- Step 3: Send result back to Node ---
+        requests.post(
+            NODE_CALLBACK_URL,
+            json={
+                "userId": userId,
+                "videoUrl": videoUrl,
+                "report": report
+            },
+            timeout=30
+        )
+
+        print('sucessfuly sent the response')
 
     except Exception as e:
-        # Catch any other unexpected errors during the process
-        print(f"An unexpected error occurred during analysis: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"An internal server error occurred: {str(e)}"
-        )
-    
-    finally: 
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+        print(f"Background analysis failed: {e}")
+    finally:
+        if os.path.exists(tmp_path):
             os.remove(tmp_path)
-            print(f"Deleted temporary file: {tmp_path}")
 
 
 @app.get("/ping", tags=["Health"])
 def ping():
     return {"status": "alive"}
 
+if __name__ == "__main__":
+    # --- Local Test Mode ---
+    print("\n--- Running local test ---")
+
+    # ✅ Replace this with your local video file path
+    test_video_path = "./1.mp4"
+    test_user_id = "TEMP_USER_001"
+
+    if not os.path.exists(test_video_path):
+        print(f"❌ Test video not found at {test_video_path}")
+    else:
+        print(f"✅ Found test video: {test_video_path}")
+        try:
+            # Simulate analysis directly without FastAPI
+            video_features = analyze_video_for_traits(test_video_path)
+            report = generate_prediction_and_report(video_features, MODEL)
+            print("\n--- Prediction Report ---")
+            print(report)
+        except Exception as e:
+            print(f"❌ Test run failed: {e}")
